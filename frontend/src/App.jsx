@@ -42,6 +42,10 @@ function App() {
     const saved = localStorage.getItem('ticketing_favorites');
     return saved ? JSON.parse(saved) : [];
   });
+  const [movieFavorites, setMovieFavorites] = useState(() => {
+    const saved = localStorage.getItem('ticketing_movie_favorites');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [keywords, setKeywords] = useState(() => {
     const saved = localStorage.getItem('ticketing_keywords');
     return saved ? JSON.parse(saved) : [];
@@ -98,12 +102,13 @@ function App() {
       try {
         setLoading(true);
         const params = { skip: (currentPage - 1) * itemsPerPage, limit: itemsPerPage, search: searchTerm };
+        const currentFavs = appMode === 'general' ? favorites : movieFavorites;
         if (showFavoritesOnly) {
-          if (favorites.length === 0) {
+          if (currentFavs.length === 0) {
             appMode === 'general' ? setEvents([]) : setMovies([]);
             setTotalEvents(0); setLoading(false); return;
           }
-          params.fav_ids = favorites.join(',');
+          params.fav_ids = currentFavs.join(',');
         }
         if (appMode === 'general') {
           params.platform = platformFilter === 'all' ? 'general_all' : platformFilter;
@@ -124,9 +129,10 @@ function App() {
     };
     const timeoutId = setTimeout(() => fetchEventsData(), 300);
     return () => clearTimeout(timeoutId);
-  }, [currentPage, platformFilter, searchTerm, showFavoritesOnly, favorites, refreshTrigger, appMode]);
+  }, [currentPage, platformFilter, searchTerm, showFavoritesOnly, favorites, movieFavorites, refreshTrigger, appMode]);
 
   useEffect(() => { localStorage.setItem('ticketing_favorites', JSON.stringify(favorites)); }, [favorites]);
+  useEffect(() => { localStorage.setItem('ticketing_movie_favorites', JSON.stringify(movieFavorites)); }, [movieFavorites]);
 
   useEffect(() => {
     localStorage.setItem('ticketing_keywords', JSON.stringify(keywords));
@@ -227,7 +233,11 @@ function App() {
 
   const toggleFavorite = (e, id) => {
     e.stopPropagation();
-    setFavorites(prev => prev.includes(id) ? prev.filter(favId => favId !== id) : [...prev, id]);
+    if (appMode === 'general') {
+      setFavorites(prev => prev.includes(id) ? prev.filter(favId => favId !== id) : [...prev, id]);
+    } else {
+      setMovieFavorites(prev => prev.includes(id) ? prev.filter(favId => favId !== id) : [...prev, id]);
+    }
   };
 
   const handleAddKeyword = (e) => {
@@ -339,14 +349,14 @@ function App() {
                     </div>
                   )}
                   
-                  <div className="card-info" style={appMode === 'movie' ? { position: 'relative', minHeight: '120px', display: 'flex', flexDirection: 'column', justifyContent: 'center' } : {}}>
+                  <div className="card-info" style={appMode === 'movie' ? { position: 'relative', minHeight: '80px', padding: '16px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'center' } : {}}>
                     {appMode === 'movie' && (
-                      <button className={`fav-btn ${favorites.includes(item.id) ? 'active' : ''}`} style={{ position: 'absolute', top: '15px', right: '15px', background: 'var(--bg-color, #fff)', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', border: 'none', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }} onClick={(e) => toggleFavorite(e, item.id)}>
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill={favorites.includes(item.id) ? "#ff4757" : "none"} stroke={favorites.includes(item.id) ? "#ff4757" : "currentColor"} strokeWidth="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+                       <button className={`fav-btn ${movieFavorites.includes(item.id) ? 'active' : ''}`} style={{ position: 'absolute', top: '50%', right: '15px', transform: 'translateY(-50%)', background: 'var(--bg-color, #fff)', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', border: 'none', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }} onClick={(e) => toggleFavorite(e, item.id)}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill={movieFavorites.includes(item.id) ? "#ff4757" : "none"} stroke={movieFavorites.includes(item.id) ? "#ff4757" : "currentColor"} strokeWidth="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
                       </button>
                     )}
-                    <h3 className="card-title" style={appMode === 'movie' ? { paddingRight: '40px', fontSize: '1.2rem', marginBottom: '10px' } : {}}>{item.title}</h3>
-                    <div className="card-footer" style={appMode === 'movie' ? { marginTop: 'auto' } : {}}>
+                    <h3 className="card-title" style={appMode === 'movie' ? { paddingRight: '50px', fontSize: '1.15rem', marginBottom: '6px', lineHeight: '1.4' } : {}}>{item.title}</h3>
+                    <div className="card-footer" style={appMode === 'movie' ? { marginTop: '0' } : {}}>
                       <span className="card-action-text">{appMode === 'general' ? '查看詳細資訊' : '查看時刻表'}</span>
                     </div>
                   </div>
