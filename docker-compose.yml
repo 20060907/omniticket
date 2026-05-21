@@ -69,8 +69,9 @@ services:
 
   frontend:
     build: ./frontend
+    command: npm run dev -- --host 0.0.0.0
     ports:
-      - "5179:5173" # 🎯 換上全新 Port，徹底避開瀏覽器終極快取
+      - "80:5173" # 🎯 直接綁定到標準網頁 Port 80，這樣網址列就不需要打 Port 號！
     environment:
       - CHOKIDAR_USEPOLLING=true # 幫助在 Docker 中正確觸發熱更新
     volumes:

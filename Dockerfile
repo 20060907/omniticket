@@ -1,5 +1,5 @@
-# 🎯 升級到與你環境匹配的 Playwright 官方映像檔，避免版本衝突
-FROM mcr.microsoft.com/playwright/python:v1.59.1-jammy
+# 🎯 放棄難搞的微軟 Tag，改用最穩定且萬用的 Python 官方映像檔！
+FROM python:3.11-bookworm
 
 # 設定工作目錄
 WORKDIR /app

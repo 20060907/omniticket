@@ -23,6 +23,7 @@ function App() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const itemsPerPage = 12;
   
   // 🎯 動態獲取 API 基礎網址，確保在手機或區網測試時不會因為 localhost 失敗而導致破圖或無法連線
@@ -70,6 +71,7 @@ function App() {
 
   useEffect(() => {
     const handleResize = () => {
+      setIsMobile(window.innerWidth <= 768);
       if (window.innerWidth <= 768 && isSidebarCollapsed) {
         setIsSidebarCollapsed(false);
       }
@@ -258,23 +260,30 @@ function App() {
 
         <div className="nav-menu">
           <p className="nav-title">瀏覽選項</p>
-          <button className={`nav-btn ${!showFavoritesOnly ? 'active' : ''}`} onClick={() => setShowFavoritesOnly(false)}>
+          <button className={`nav-btn ${!showFavoritesOnly ? 'active' : ''}`} onClick={() => { setShowFavoritesOnly(false); setIsMobileMenuOpen(false); }}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
             <span className="nav-text">所有活動</span>
           </button>
-          <button className={`nav-btn ${showFavoritesOnly ? 'active' : ''}`} onClick={() => setShowFavoritesOnly(true)}>
+          <button className={`nav-btn ${showFavoritesOnly ? 'active' : ''}`} onClick={() => { setShowFavoritesOnly(true); setIsMobileMenuOpen(false); }}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
             <span className="nav-text">我的收藏</span>
           </button>
+          {/* 🎯 手機版專用的訂閱通知按鈕 */}
+          {isMobile && (
+            <button className="nav-btn" onClick={() => { setShowKeywordModal(true); setIsMobileMenuOpen(false); }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+              <span className="nav-text">訂閱通知</span>
+            </button>
+          )}
         </div>
 
         {appMode === 'general' && (
           <div className="nav-menu">
             <p className="nav-title">售票平台</p>
-            <button className={`nav-btn ${platformFilter === 'all' ? 'active' : ''}`} onClick={() => setPlatformFilter('all')}><span className="nav-dot all"></span><span className="nav-text">全部平台</span></button>
-            <button className={`nav-btn ${platformFilter === 'kktix' ? 'active' : ''}`} onClick={() => setPlatformFilter('kktix')}><span className="nav-dot kktix"></span><span className="nav-text">KKTIX</span></button>
-            <button className={`nav-btn ${platformFilter === 'tixcraft' ? 'active' : ''}`} onClick={() => setPlatformFilter('tixcraft')}><span className="nav-dot tixcraft"></span><span className="nav-text">拓元售票</span></button>
-            <button className={`nav-btn ${platformFilter === 'ticketplus' ? 'active' : ''}`} onClick={() => setPlatformFilter('ticketplus')}><span className="nav-dot ticketplus"></span><span className="nav-text">遠大售票</span></button>
+            <button className={`nav-btn ${platformFilter === 'all' ? 'active' : ''}`} onClick={() => { setPlatformFilter('all'); setIsMobileMenuOpen(false); }}><span className="nav-dot all"></span><span className="nav-text">全部平台</span></button>
+            <button className={`nav-btn ${platformFilter === 'kktix' ? 'active' : ''}`} onClick={() => { setPlatformFilter('kktix'); setIsMobileMenuOpen(false); }}><span className="nav-dot kktix"></span><span className="nav-text">KKTIX</span></button>
+            <button className={`nav-btn ${platformFilter === 'tixcraft' ? 'active' : ''}`} onClick={() => { setPlatformFilter('tixcraft'); setIsMobileMenuOpen(false); }}><span className="nav-dot tixcraft"></span><span className="nav-text">拓元售票</span></button>
+            <button className={`nav-btn ${platformFilter === 'ticketplus' ? 'active' : ''}`} onClick={() => { setPlatformFilter('ticketplus'); setIsMobileMenuOpen(false); }}><span className="nav-dot ticketplus"></span><span className="nav-text">遠大售票</span></button>
           </div>
         )}
       </aside>
@@ -304,24 +313,40 @@ function App() {
           
           {loading && !error ? (
             <div className="message"><div className="spinner"></div><p>系統載入中...</p></div>
+          ) : !error && (appMode === 'general' ? events : movies).length === 0 ? (
+            <div className="message">
+              <p style={{ color: 'var(--text-secondary, #666)', fontSize: '1.1rem' }}>
+                {showFavoritesOnly ? '目前沒有收藏的活動' : '找不到相關活動'}
+              </p>
+            </div>
           ) : (
             <div className="event-grid">
               {(appMode === 'general' ? events : movies).map(item => (
                 <div key={item.id} className="event-card" onClick={() => appMode === 'general' ? setSelectedEvent(item) : setSelectedMovie(item)}>
-                  <div className="card-image-wrap">
-                    {item.cover_image_url ? (
-                      <img src={getValidImageUrl(item.cover_image_url)} alt={item.title} className="card-image" referrerPolicy="no-referrer" onError={(e) => { e.target.onerror = null; e.target.src = "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=400&auto=format&fit=crop"; }} />
-                    ) : (
-                      <div className="card-no-image">圖片載入中</div>
+                  {appMode === 'general' && (
+                    <div className="card-image-wrap">
+                      {item.cover_image_url ? (
+                        <img src={getValidImageUrl(item.cover_image_url)} alt={item.title} className="card-image" referrerPolicy="no-referrer" onError={(e) => { e.target.onerror = null; e.target.src = "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=400&auto=format&fit=crop"; }} />
+                      ) : (
+                        <div className="card-no-image">圖片載入中</div>
+                      )}
+                      {item.source_platform && (
+                        <span className={`platform-badge ${item.source_platform}`}>{item.source_platform.toUpperCase()}</span>
+                      )}
+                      <button className={`fav-btn ${favorites.includes(item.id) ? 'active' : ''}`} onClick={(e) => toggleFavorite(e, item.id)}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill={favorites.includes(item.id) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+                      </button>
+                    </div>
+                  )}
+                  
+                  <div className="card-info" style={appMode === 'movie' ? { position: 'relative', minHeight: '120px', display: 'flex', flexDirection: 'column', justifyContent: 'center' } : {}}>
+                    {appMode === 'movie' && (
+                      <button className={`fav-btn ${favorites.includes(item.id) ? 'active' : ''}`} style={{ position: 'absolute', top: '15px', right: '15px', background: 'var(--bg-color, #fff)', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', border: 'none', borderRadius: '50%', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }} onClick={(e) => toggleFavorite(e, item.id)}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill={favorites.includes(item.id) ? "#ff4757" : "none"} stroke={favorites.includes(item.id) ? "#ff4757" : "currentColor"} strokeWidth="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+                      </button>
                     )}
-                    {appMode === 'general' && item.source_platform && (
-                      <span className={`platform-badge ${item.source_platform}`}>{item.source_platform.toUpperCase()}</span>
-                    )}
-                    <button className={`fav-btn ${favorites.includes(item.id) ? 'active' : ''}`} onClick={(e) => toggleFavorite(e, item.id)}>❤</button>
-                  </div>
-                  <div className="card-info">
-                    <h3 className="card-title">{item.title}</h3>
-                    <div className="card-footer">
+                    <h3 className="card-title" style={appMode === 'movie' ? { paddingRight: '40px', fontSize: '1.2rem', marginBottom: '10px' } : {}}>{item.title}</h3>
+                    <div className="card-footer" style={appMode === 'movie' ? { marginTop: 'auto' } : {}}>
                       <span className="card-action-text">{appMode === 'general' ? '查看詳細資訊' : '查看時刻表'}</span>
                     </div>
                   </div>
@@ -365,8 +390,7 @@ function App() {
         <div className="modal-overlay" onClick={() => setSelectedMovie(null)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setSelectedMovie(null)}>✕</button>
-            <img src={getValidImageUrl(selectedMovie.cover_image_url)} className="modal-img contain" alt="cover" referrerPolicy="no-referrer" onError={(e) => { e.target.onerror = null; e.target.src = "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=400&auto=format&fit=crop"; }} />
-            <div className="modal-body">
+            <div className="modal-body" style={{ paddingTop: '30px' }}>
               <span className="platform-badge atmovies inline">電影時刻</span>
               <h2 className="modal-title">{selectedMovie.title}</h2>
               
