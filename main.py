@@ -153,11 +153,17 @@ def read_events(request: Request, source: str, skip: int = 0, limit: int = 100, 
     return events
 
 @app.get("/api/movies")
-def read_movies(skip: int = 0, limit: int = 24, search: str = "", db: Session = Depends(get_db)):
+def read_movies(skip: int = 0, limit: int = 24, search: str = "", fav_ids: str = "", db: Session = Depends(get_db)):
     """讀取電影清單"""
     query = db.query(models.Movie)
     if search:
         query = query.filter(models.Movie.title.ilike(f"%{search}%"))
+        
+    if fav_ids:
+        ids = [int(x) for x in fav_ids.split(",") if x.isdigit()]
+        if ids:
+            query = query.filter(models.Movie.id.in_(ids))
+            
     total = query.count()
     movies = query.order_by(models.Movie.id.desc()).offset(skip).limit(limit).all()
     return {"total": total, "movies": movies}
