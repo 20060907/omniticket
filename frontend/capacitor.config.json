@@ -1,0 +1,9 @@
+{
+  "appId": "com.ticketing.radar",
+  "appName": "搶票雷達",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "cleartext": true
+  }
+}

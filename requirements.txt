@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+redis
+celery
+playwright
+SQLAlchemy
+psycopg2-binary
+beautifulsoup4
+arrow
+requests
+beautifulsoup4
