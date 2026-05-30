@@ -211,7 +211,8 @@ async def scrape_kktix_events(db: Session):
                                 "--no-sandbox",
                                 "--window-size=1920,1080",
                                 "--disable-dev-shm-usage"
-                            ]
+                            ],
+                            ignore_default_args=["--enable-automation"]
                         )
                         try:
                             context = await browser.new_context(
@@ -221,24 +222,17 @@ async def scrape_kktix_events(db: Session):
                             )
                             page = await context.new_page()
                             
-                            # 隱藏自動化標籤
+                            # 隱藏自動化標籤與增加偽裝
                             await page.add_init_script("""
-                                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                                Object.defineProperty(navigator, 'webdriver', {get: () => false});
                                 window.chrome = { runtime: {} };
+                                Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en-US', 'en']});
+                                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
                             """)
                             
-                            # 🎯 網路攔截器：無差別捕捉 KKTIX 載入時發出的所有 JSON API！
-                            intercepted_jsons = []
-                            async def handle_response(response):
-                                if "json" in response.headers.get("content-type", ""):
-                                    try:
-                                        data = await response.json()
-                                        intercepted_jsons.append(data)
-                                    except: pass
-                            page.on("response", handle_response)
-                            
                             print("SCRAPER: [KKTIX] 正在以 Chromium 訪問首頁並計算 CF 挑戰...")
-                            await page.goto("https://kktix.com/events", timeout=60000, wait_until="domcontentloaded")
+                            # 改訪問首頁，避免 /events 的嚴格防護
+                            await page.goto("https://kktix.com/", timeout=60000, wait_until="domcontentloaded")
                             
                             # 給 Cloudflare 一點時間運算通過驗證
                             for _ in range(20):
@@ -252,68 +246,72 @@ async def scrape_kktix_events(db: Session):
                                 else:
                                     break
                                     
-                            print("SCRAPER: [KKTIX] CF 驗證結束，等待頁面與活動列表載入...")
-                            # 🎯 關鍵修復：等待至少一個活動卡片出現，確保 SPA 渲染完成！
-                            try:
-                                await page.wait_for_selector('a[href*="/events/"]:not([href$="/events"]):not([href$="/events/"])', timeout=15000)
-                            except Exception as e:
-                                print(f"SCRAPER: [KKTIX] 等待活動列表超時 (可能已被阻擋或無活動): {e}")
-
-                            # 向下捲動，觸發更多懶加載與底層 API
-                            for _ in range(3):
-                                await page.evaluate("window.scrollBy(0, 800);")
-                                await page.wait_for_timeout(1500)
-                                
-                            print(f"SCRAPER: [KKTIX] 頁面載入完成，共攔截到 {len(intercepted_jsons)} 個 API 回應。")
+                            title = await page.title()
+                            print(f"SCRAPER: [KKTIX] CF 驗證結束，當前網頁標題為: '{title}'")
                             
-                            # 1. 優先從攔截到的底層 JSON 中提取
-                            def extract_from_json(obj):
-                                if isinstance(obj, dict):
-                                    # 遞迴尋找符合 KKTIX 格式的物件
-                                    if "url" in obj and "title" in obj and "summary" in obj:
-                                        url, title, summary = obj.get("url", ""), obj.get("title", ""), obj.get("summary", "")
-                                        if url and "/events/" in url and title and "建立活動" not in title:
-                                            if url not in seen_urls:
-                                                seen_urls.add(url)
-                                                img_src = ""
-                                                if summary:
-                                                    soup_sum = BeautifulSoup(str(summary), 'html.parser')
-                                                    img = soup_sum.find('img')
-                                                    if img: img_src = img.get('src') or ""
-                                                events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
-                                    for v in obj.values(): extract_from_json(v)
-                                elif isinstance(obj, list):
-                                    for item in obj: extract_from_json(item)
+                            # 🎯 絕招：在通關的瀏覽器內直接 fetch Atom Feed！
+                            print("SCRAPER: [KKTIX] 嘗試在已通關的瀏覽器內部 fetch Atom Feed...")
+                            try:
+                                atom_text = await page.evaluate('''async () => {
+                                    const resp = await fetch("/events.atom");
+                                    if (!resp.ok) return null;
+                                    return await resp.text();
+                                }''')
+                                
+                                if atom_text and "<entry>" in atom_text:
+                                    soup = BeautifulSoup(atom_text, "html.parser")
+                                    for entry in soup.find_all("entry"):
+                                        title_elem = entry.find("title")
+                                        link_elem = entry.find("link")
+                                        summary_elem = entry.find("summary")
+                                        if not title_elem or not link_elem: continue
+                                        title_str, url = title_elem.text.strip(), link_elem.get("href", "")
+                                        if not url or url in seen_urls: continue
+                                        if "dashboard/events/new" in url or "建立活動" in title_str: continue
+                                        img_src = ""
+                                        if summary_elem:
+                                            soup_sum = BeautifulSoup(summary_elem.text, 'html.parser')
+                                            img = soup_sum.find('img')
+                                            if img: img_src = img.get('src') or ""
+                                        if title_str and len(title_str) > 2:
+                                            seen_urls.add(url)
+                                            events_data.append({"title": re.sub(r'\s+', ' ', title_str), "url": url, "cover_image": img_src})
+                            except Exception as e:
+                                print(f"SCRAPER: [KKTIX] 內部 Fetch Atom 失敗: {e}")
 
-                            for data in intercepted_jsons:
-                                extract_from_json(data)
-                                
                             if events_data:
-                                print(f"SCRAPER: [KKTIX] 成功從底層 API 攔截到 {len(events_data)} 筆活動！")
+                                print(f"SCRAPER: [KKTIX] 成功從內部 Atom 攔截到 {len(events_data)} 筆活動！")
                                 
-                            # 2. 如果 JSON 攔截落空，改用真正的 DOM 網頁解析
+                            # 如果內部 Atom 失敗，改用 DOM 網頁解析
                             if not events_data:
-                                print("SCRAPER: [KKTIX] API 攔截無結果，改用 DOM 網頁解析...")
+                                print("SCRAPER: [KKTIX] Atom 攔截無結果，前往活動列表頁面解析 DOM...")
+                                await page.goto("https://kktix.com/events", timeout=60000, wait_until="domcontentloaded")
+                                await page.wait_for_timeout(3000)
+                                
+                                for _ in range(3):
+                                    await page.evaluate("window.scrollBy(0, 800);")
+                                    await page.wait_for_timeout(1500)
+                                    
                                 html_content = await page.content()
                                 soup = BeautifulSoup(html_content, 'html.parser')
                                 for a in soup.find_all('a', href=True):
                                     url = a.get('href', '')
                                     if not ('/events/' in url) or url.endswith('/events') or '/dashboard/' in url or url in seen_urls: continue
-                                    title = a.get_text(strip=True)
+                                    title_str = a.get_text(strip=True)
                                     img_src = ""
                                     container = a.find_parent(['li', 'div', 'article', 'a'])
                                     if container:
                                         img = container.find('img')
                                         if img: img_src = img.get('src') or img.get('data-src') or img.get('ng-src') or ""
-                                        if not title:
+                                        if not title_str:
                                             heading = container.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'p'], class_=re.compile(r'title|name', re.I))
-                                            if heading: title = heading.get_text(strip=True)
-                                    if not title and img_src:
+                                            if heading: title_str = heading.get_text(strip=True)
+                                    if not title_str and img_src:
                                         img = a.find('img')
-                                        if img: title = img.get('alt') or a.get('title') or ""
-                                    if title and len(title) > 2 and "建立活動" not in title:
+                                        if img: title_str = img.get('alt') or a.get('title') or ""
+                                    if title_str and len(title_str) > 2 and "建立活動" not in title_str:
                                         seen_urls.add(url)
-                                        events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                                        events_data.append({"title": re.sub(r'\s+', ' ', title_str), "url": url, "cover_image": img_src})
                         finally:
                             await browser.close()
                 except Exception as e:
