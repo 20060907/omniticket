@@ -9,3 +9,5 @@ beautifulsoup4
 arrow
 requests
 beautifulsoup4
+curl_cffi
+beautifulsoup4
