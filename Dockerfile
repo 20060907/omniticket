@@ -7,6 +7,9 @@ WORKDIR /app
 # 複製依賴清單並安裝
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN playwright install chromium firefox
+RUN playwright install-deps chromium firefox
+
 
 # 🎯 同時安裝 Chromium 與 WebKit，並加上 --with-deps 確保 Linux 底層依賴自動安裝齊全
 RUN playwright install --with-deps chromium webkit
