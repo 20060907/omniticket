@@ -13,7 +13,7 @@ from playwright.async_api import async_playwright
 
 
 async def scrape_kktix_events(db: Session):
-    print("SCRAPER: [KKTIX] Starting scrape job using Playwright (Firefox)...")
+    print("SCRAPER: [KKTIX] Starting scrape job using Playwright (Chromium Stealth)...")
     new_event_titles = []
     
     try:
@@ -22,26 +22,43 @@ async def scrape_kktix_events(db: Session):
         db.commit()
 
         async with async_playwright() as p:
-            # 🎯 刪除所有無用代理，回歸 Firefox！它能無痛自動通過 Cloudflare 驗證！
-            browser = await p.firefox.launch(headless=True)
+            # 🎯 終極解答：TicketPlus 的 Chromium 隱身參數 + 內部 Fetch Atom Feed！
+            # 經交叉比對，Chromium 的隱身模式能成功通過 CF，而 events.atom 是唯一存活的 API
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-sandbox",
+                    "--window-size=1920,1080",
+                    "--disable-dev-shm-usage"
+                ],
+                ignore_default_args=["--enable-automation"]
+            )
             try:
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                     viewport={"width": 1920, "height": 1080},
                     locale="zh-TW"
                 )
                 page = await context.new_page()
                 
                 # 隱藏自動化標籤
-                await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
+                await page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    window.chrome = { runtime: {} };
+                """)
                 
-                print("SCRAPER: [KKTIX] 正在以 Firefox 訪問首頁並等待 CF 通關...")
+                print("SCRAPER: [KKTIX] 正在以 Chromium (TicketPlus 隱身模式) 訪問首頁並等待 CF 通關...")
                 await page.goto("https://kktix.com/", timeout=60000, wait_until="domcontentloaded")
                 
                 # 給 Cloudflare 一點時間運算通過驗證
                 for _ in range(15):
                     title = await page.title()
                     if any(kw in title for kw in ["Just a moment", "Cloudflare", "Attention Required", "請稍候"]):
+                        try:
+                            await page.mouse.click(300, 300)
+                        except: pass
                         await page.wait_for_timeout(3000)
                     else:
                         break
@@ -52,31 +69,37 @@ async def scrape_kktix_events(db: Session):
                 events_data = []
                 seen_urls = set()
                 
-                print("SCRAPER: [KKTIX] 嘗試在已通關的 Firefox 內部擷取 JSON API...")
+                print("SCRAPER: [KKTIX] 嘗試在已通關的 Chromium 內部擷取 Atom Feed...")
                 try:
                     # 利用已通關的瀏覽器 Cookie 進行內部 API 請求
                     api_data = await page.evaluate('''async () => {
-                        const resp = await fetch("/events.json");
+                        const resp = await fetch("/events.atom");
                         if (!resp.ok) return null;
-                        return await resp.json();
+                        return await resp.text();
                     }''')
                     
-                    if api_data and "entry" in api_data:
-                        print("SCRAPER: [KKTIX] 內部 Fetch JSON 成功抓到資料！")
-                        for entry in api_data.get("entry", []):
-                            url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
+                    if api_data and "<entry>" in api_data:
+                        print("SCRAPER: [KKTIX] 內部 Fetch Atom 成功抓到資料！")
+                        soup = BeautifulSoup(api_data, "html.parser")
+                        for entry in soup.find_all("entry"):
+                            title_elem = entry.find("title")
+                            link_elem = entry.find("link")
+                            summary_elem = entry.find("summary") or entry.find("content")
+                            if not title_elem or not link_elem: continue
+                            title_str = title_elem.text.strip()
+                            url = link_elem.get("href", "")
                             if not url or url in seen_urls: continue
-                            if "dashboard/events/new" in url or "建立活動" in title: continue
+                            if "dashboard/events/new" in url or "建立活動" in title_str: continue
                             img_src = ""
-                            if summary:
-                                soup_sum = BeautifulSoup(summary, 'html.parser')
+                            if summary_elem:
+                                soup_sum = BeautifulSoup(summary_elem.text, 'html.parser')
                                 img = soup_sum.find('img')
                                 if img: img_src = img.get('src') or ""
-                            if title and len(title) > 2:
+                            if title_str and len(title_str) > 2:
                                 seen_urls.add(url)
-                                events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                                events_data.append({"title": re.sub(r'\s+', ' ', title_str), "url": url, "cover_image": img_src})
                 except Exception as e:
-                    print(f"SCRAPER: [KKTIX] 內部 Fetch JSON 失敗: {e}")
+                    print(f"SCRAPER: [KKTIX] 內部 Fetch Atom 失敗: {e}")
 
                 if not events_data:
                     print("SCRAPER: [KKTIX] 警告：無法獲取活動資料。")
