@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import re
+import urllib.parse
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession
 import redis.asyncio as redis
@@ -17,44 +18,35 @@ async def scrape_kktix_events(db: Session):
         db.query(Event).filter(Event.title.like('%建立活動%')).delete(synchronize_session=False)
         db.commit()
 
-        # 🎯 終極武器：使用 curl_cffi 完美偽裝成 Chrome 120 的底層網路封包！
+        # 🎯 終極武器：AWS IP 被封鎖的剋星 -> 改用官方隱藏 JSON API！
         async with AsyncSession(impersonate="chrome120") as session:
-            target_url = "https://kktix.com/events?end_at=&event_tag_ids_in=1%2C6&max_price=&min_price=&search=&start_at="
-            print("SCRAPER: [KKTIX] 正在獲取活動列表...")
-            response = await session.get(target_url, timeout=30)
+            print("SCRAPER: [KKTIX] 正在透過官方 JSON API 獲取活動列表...")
+            response = await session.get("https://kktix.com/events.json", timeout=30)
             
-            if "Just a moment" in response.text or "Cloudflare" in response.text:
-                print("SCRAPER: [KKTIX] 警告：仍被 CF 攔截。")
+            if response.status_code != 200:
+                print("SCRAPER: [KKTIX] 警告：API 請求失敗。")
                 return []
                 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            data = response.json()
+            entries = data.get("entry", []) if isinstance(data, dict) else []
             events_data = []
             seen_urls = set()
             
-            links = soup.find_all('a', href=True)
-            for a in links:
-                url = a['href']
-                if not ('/events/' in url) or url.endswith('/events') or '/dashboard/' in url or url in seen_urls:
-                    continue
-                    
-                title = a.get_text(strip=True)
+            for entry in entries:
+                url = entry.get("url", "")
+                title = entry.get("title", "")
+                summary = entry.get("summary", "")
+                
+                if not url or url in seen_urls: continue
+                if "dashboard/events/new" in url or "建立活動" in title: continue
+                
                 img_src = ""
-                
-                container = a.find_parent(['li', 'div', 'article', 'a'])
-                if container:
-                    img = container.find('img')
-                    if img:
-                        img_src = img.get('src') or img.get('data-src') or img.get('ng-src') or ""
-                    if not title:
-                        heading = container.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'p'], class_=re.compile(r'title|name', re.I))
-                        if heading:
-                            title = heading.get_text(strip=True)
-                
-                if not title and img_src:
-                    img = a.find('img')
-                    title = a.get('title') or (img.get('alt') if img else '')
-                
-                if title and len(title) > 2 and "建立活動" not in title:
+                if summary:
+                    soup_sum = BeautifulSoup(summary, 'html.parser')
+                    img = soup_sum.find('img')
+                    if img: img_src = img.get('src') or ""
+                    
+                if title and len(title) > 2:
                     seen_urls.add(url)
                     events_data.append({
                         "title": re.sub(r'\s+', ' ', title),
@@ -94,7 +86,9 @@ async def scrape_kktix_events(db: Session):
             for ev in events_to_deep_scrape:
                 try:
                     print(f"SCRAPER: [KKTIX] 深度抓取內頁 -> {ev.title}")
-                    res = await session.get(ev.external_url, timeout=15)
+                    # 透過 AllOrigins 代理繞過內頁 IP 封鎖
+                    proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(ev.external_url)}"
+                    res = await session.get(proxy_url, timeout=15)
                     inner_soup = BeautifulSoup(res.text, 'html.parser')
                     info = inner_soup.find(class_='event-info')
                     ev.description = info.get_text(strip=True)[:400] + '\n...' if info else '請點擊「前往原網站搶票」查看詳細資訊。'
@@ -116,12 +110,16 @@ async def scrape_tixcraft_events(db: Session):
     
     try:
         async with AsyncSession(impersonate="chrome120") as session:
-            print("SCRAPER: [TIXCRAFT] 正在進入活動列表...")
-            response = await session.get("https://tixcraft.com/activity", timeout=30)
+            print("SCRAPER: [TIXCRAFT] 透過 AllOrigins 代理繞過 AWS IP 封鎖...")
+            proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote('https://tixcraft.com/activity')}"
+            response = await session.get(proxy_url, timeout=30)
             
             if "Identity Verified" in response.text or "Cloudfront" in response.text:
-                print("SCRAPER: [TIXCRAFT] 警告：仍被 AWS WAF 攔截。")
-                return []
+                print("SCRAPER: [TIXCRAFT] 警告：代理仍被 WAF 攔截，嘗試偽裝成 Googlebot...")
+                response = await session.get("https://tixcraft.com/activity", headers={"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}, timeout=30)
+                if "Identity Verified" in response.text or "Cloudfront" in response.text:
+                    print("SCRAPER: [TIXCRAFT] 警告：所有突破方式皆被攔截。")
+                    return []
                 
             soup = BeautifulSoup(response.text, 'html.parser')
             events_data = []
@@ -156,6 +154,9 @@ async def scrape_tixcraft_events(db: Session):
                     if img:
                         img_src = img.get('src') or img.get('data-src') or ""
                         
+                if img_src and img_src.startswith('/'):
+                    img_src = f"https://tixcraft.com{img_src}"
+                    
                 if title and len(title) > 2:
                     seen_urls.add(url)
                     events_data.append({
@@ -191,7 +192,8 @@ async def scrape_tixcraft_events(db: Session):
             for ev in events_to_deep_scrape:
                 try:
                     print(f"SCRAPER: [TIXCRAFT] 深度抓取內頁 -> {ev.title}")
-                    res = await session.get(ev.external_url, timeout=15)
+                    proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(ev.external_url)}"
+                    res = await session.get(proxy_url, timeout=15)
                     inner_soup = BeautifulSoup(res.text, 'html.parser')
                     info = inner_soup.find(['div', 'table'], class_=re.compile(r'activity-info|game-info|table', re.I))
                     desc = info.get_text(strip=True)[:400] + '\n...' if info else '請點擊「前往原網站搶票」查看詳細資訊。'
