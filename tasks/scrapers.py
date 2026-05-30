@@ -8,6 +8,8 @@ from curl_cffi.requests import AsyncSession
 import redis.asyncio as redis
 from sqlalchemy.orm import Session
 from db.models import Event
+from playwright.async_api import async_playwright
+
 
 async def fetch_with_proxies(session, target_url, is_json=False):
     """強大的多重免費代理輪詢機制，加上社群爬蟲白名單偽裝"""
@@ -196,6 +198,76 @@ async def scrape_kktix_events(db: Session):
                                 seen_urls.add(url)
                                 events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
                             
+            if not events_data:
+                print("SCRAPER: [KKTIX] 警告：純請求皆被 CF 阻擋。啟動終極大絕招：Playwright 真人模擬通關...")
+                try:
+                    async with async_playwright() as p:
+                        # 使用 Firefox 引擎最容易自動通關 CF Turnstile
+                        browser = await p.firefox.launch(headless=True)
+                        try:
+                            context = await browser.new_context(
+                                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
+                                viewport={"width": 1920, "height": 1080},
+                                locale="zh-TW"
+                            )
+                            page = await context.new_page()
+                            # 隱藏自動化標籤
+                            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
+                            
+                            print("SCRAPER: [KKTIX] 正在以無頭瀏覽器訪問 events.json 並計算 CF 挑戰...")
+                            await page.goto("https://kktix.com/events.json", timeout=60000)
+                            
+                            # 給 Cloudflare 一點時間運算通過驗證
+                            for _ in range(15):
+                                title = await page.title()
+                                if "Just a moment" in title or "Cloudflare" in title or "Attention Required" in title:
+                                    await page.wait_for_timeout(3000)
+                                else:
+                                    break
+                                    
+                            content = await page.evaluate("() => document.body.innerText")
+                            try:
+                                data = json.loads(content)
+                                if "entry" in data:
+                                    print("SCRAPER: [KKTIX] Playwright 成功突破 Cloudflare 驗證！")
+                                    for entry in data.get("entry", []):
+                                        url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
+                                        if not url or url in seen_urls: continue
+                                        if "dashboard/events/new" in url or "建立活動" in title: continue
+                                        img_src = ""
+                                        if summary:
+                                            soup_sum = BeautifulSoup(summary, 'html.parser')
+                                            img = soup_sum.find('img')
+                                            if img: img_src = img.get('src') or ""
+                                        if title and len(title) > 2:
+                                            seen_urls.add(url)
+                                            events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                            except Exception as e:
+                                print(f"SCRAPER: [KKTIX] Playwright JSON 解析失敗: {e}，嘗試退回抓取首頁...")
+                                await page.goto("https://kktix.com/events", timeout=60000)
+                                await page.wait_for_timeout(5000)
+                                html_content = await page.content()
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                for a in soup.find_all('a', href=True):
+                                    url = a.get('href', '')
+                                    if not ('/events/' in url) or url.endswith('/events') or '/dashboard/' in url or url in seen_urls: continue
+                                    title = a.get_text(strip=True)
+                                    img_src = ""
+                                    container = a.find_parent(['li', 'div', 'article', 'a'])
+                                    if container:
+                                        img = container.find('img')
+                                        if img: img_src = img.get('src') or img.get('data-src') or img.get('ng-src') or ""
+                                        if not title:
+                                            heading = container.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'p'], class_=re.compile(r'title|name', re.I))
+                                            if heading: title = heading.get_text(strip=True)
+                                    if title and len(title) > 2 and "建立活動" not in title:
+                                        seen_urls.add(url)
+                                        events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                        finally:
+                            await browser.close()
+                except Exception as e:
+                    print(f"SCRAPER: [KKTIX] Playwright 執行失敗: {e}")
+
             if not events_data:
                 print("SCRAPER: [KKTIX] 警告：所有突破方式皆失敗。")
                 return []
