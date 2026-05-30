@@ -9,6 +9,34 @@ import redis.asyncio as redis
 from sqlalchemy.orm import Session
 from db.models import Event
 
+async def fetch_with_proxies(session, target_url, is_json=False):
+    """強大的多重免費代理輪詢機制，徹底繞過 AWS IP 封鎖"""
+    proxies = [
+        target_url, # 1. 直連 (有時 WAF 會放行)
+        f"https://corsproxy.io/?url={urllib.parse.quote(target_url)}", # 2. 強大的 CORS Proxy
+        f"https://api.codetabs.com/v1/proxy/?quest={urllib.parse.quote(target_url)}", # 3. CodeTabs 代理
+        f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}" # 4. AllOrigins 代理
+    ]
+    
+    for p_url in proxies:
+        try:
+            resp = await session.get(p_url, timeout=15)
+            if resp.status_code == 200:
+                text = resp.text
+                # 檢查是否被 WAF 攔截畫面取代
+                if any(waf in text for waf in ["Identity Verified", "Cloudfront", "Just a moment", "Cloudflare", "Attention Required"]):
+                    continue
+                
+                if is_json:
+                    try:
+                        data = resp.json()
+                        if data: return data, text
+                    except Exception: continue
+                else:
+                    if len(text) > 300: return None, text
+        except Exception: pass
+    return None, None
+
 async def scrape_kktix_events(db: Session):
     print("SCRAPER: [KKTIX] Starting scrape job using curl_cffi...")
     new_event_titles = []
@@ -18,41 +46,60 @@ async def scrape_kktix_events(db: Session):
         db.query(Event).filter(Event.title.like('%建立活動%')).delete(synchronize_session=False)
         db.commit()
 
-        # 🎯 終極武器：AWS IP 被封鎖的剋星 -> 改用官方隱藏 JSON API！
         async with AsyncSession(impersonate="chrome120") as session:
-            print("SCRAPER: [KKTIX] 正在透過官方 JSON API 獲取活動列表...")
-            response = await session.get("https://kktix.com/events.json", timeout=30)
+            print("SCRAPER: [KKTIX] 嘗試透過多重代理與 Atom Feed 獲取活動列表...")
             
-            if response.status_code != 200:
-                print("SCRAPER: [KKTIX] 警告：API 請求失敗。")
-                return []
-                
-            data = response.json()
-            entries = data.get("entry", []) if isinstance(data, dict) else []
+            # KKTIX 隱藏技巧：Atom Feed 幾乎不會被 Cloudflare 擋！
+            json_data, atom_text = await fetch_with_proxies(session, "https://kktix.com/events.atom", is_json=False)
+            
             events_data = []
             seen_urls = set()
             
-            for entry in entries:
-                url = entry.get("url", "")
-                title = entry.get("title", "")
-                summary = entry.get("summary", "")
-                
-                if not url or url in seen_urls: continue
-                if "dashboard/events/new" in url or "建立活動" in title: continue
-                
-                img_src = ""
-                if summary:
-                    soup_sum = BeautifulSoup(summary, 'html.parser')
-                    img = soup_sum.find('img')
-                    if img: img_src = img.get('src') or ""
+            if atom_text and "<entry>" in atom_text:
+                soup = BeautifulSoup(atom_text, "html.parser")
+                for entry in soup.find_all("entry"):
+                    title_elem = entry.find("title")
+                    link_elem = entry.find("link")
+                    summary_elem = entry.find("summary")
                     
-                if title and len(title) > 2:
-                    seen_urls.add(url)
-                    events_data.append({
-                        "title": re.sub(r'\s+', ' ', title),
-                        "url": url,
-                        "cover_image": img_src
-                    })
+                    if not title_elem or not link_elem: continue
+                    title, url = title_elem.text.strip(), link_elem.get("href", "")
+                    
+                    if not url or url in seen_urls: continue
+                    if "dashboard/events/new" in url or "建立活動" in title: continue
+                    
+                    img_src = ""
+                    if summary_elem:
+                        soup_sum = BeautifulSoup(summary_elem.text, 'html.parser')
+                        img = soup_sum.find('img')
+                        if img: img_src = img.get('src') or ""
+                        
+                    if title and len(title) > 2:
+                        seen_urls.add(url)
+                        events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+            else:
+                # 備用方案：JSON API + 多重代理
+                json_data, _ = await fetch_with_proxies(session, "https://kktix.com/events.json", is_json=True)
+                if json_data:
+                    for entry in json_data.get("entry", []):
+                        url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
+                        
+                        if not url or url in seen_urls: continue
+                        if "dashboard/events/new" in url or "建立活動" in title: continue
+                        
+                        img_src = ""
+                        if summary:
+                            soup_sum = BeautifulSoup(summary, 'html.parser')
+                            img = soup_sum.find('img')
+                            if img: img_src = img.get('src') or ""
+                            
+                        if title and len(title) > 2:
+                            seen_urls.add(url)
+                            events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                            
+            if not events_data:
+                print("SCRAPER: [KKTIX] 警告：所有突破方式皆失敗。")
+                return []
                     
             print(f"SCRAPER: [KKTIX] 本頁共找到 {len(events_data)} 個活動。")
             
@@ -86,10 +133,9 @@ async def scrape_kktix_events(db: Session):
             for ev in events_to_deep_scrape:
                 try:
                     print(f"SCRAPER: [KKTIX] 深度抓取內頁 -> {ev.title}")
-                    # 透過 AllOrigins 代理繞過內頁 IP 封鎖
-                    proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote(ev.external_url)}"
-                    res = await session.get(proxy_url, timeout=15)
-                    inner_soup = BeautifulSoup(res.text, 'html.parser')
+                    _, inner_text = await fetch_with_proxies(session, ev.external_url, is_json=False)
+                    
+                    inner_soup = BeautifulSoup(inner_text or "", 'html.parser')
                     info = inner_soup.find(class_='event-info')
                     ev.description = info.get_text(strip=True)[:400] + '\n...' if info else '請點擊「前往原網站搶票」查看詳細資訊。'
                     db.commit()
