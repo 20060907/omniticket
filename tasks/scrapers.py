@@ -13,7 +13,7 @@ from playwright.async_api import async_playwright
 
 
 async def scrape_kktix_events(db: Session):
-    print("SCRAPER: [KKTIX] Starting scrape job using Playwright (Chromium Stealth)...")
+    print("SCRAPER: [KKTIX] Starting scrape job using Playwright (Firefox + Atom)...")
     new_event_titles = []
     
     try:
@@ -22,34 +22,21 @@ async def scrape_kktix_events(db: Session):
         db.commit()
 
         async with async_playwright() as p:
-            # 🎯 終極解答：TicketPlus 的 Chromium 隱身參數 + 內部 Fetch Atom Feed！
-            # 經交叉比對，Chromium 的隱身模式能成功通過 CF，而 events.atom 是唯一存活的 API
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                    "--no-sandbox",
-                    "--window-size=1920,1080",
-                    "--disable-dev-shm-usage"
-                ],
-                ignore_default_args=["--enable-automation"]
-            )
+            # 🎯 真正的終極解答：Firefox 引擎 + 內部 Fetch Atom Feed！
+            # Firefox 能完美騙過 CF 拿到 Cookie，且 fetch Atom 能避開 API 封鎖與畫面渲染
+            browser = await p.firefox.launch(headless=True)
             try:
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
                     viewport={"width": 1920, "height": 1080},
                     locale="zh-TW"
                 )
                 page = await context.new_page()
                 
                 # 隱藏自動化標籤
-                await page.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    window.chrome = { runtime: {} };
-                """)
+                await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
                 
-                print("SCRAPER: [KKTIX] 正在以 Chromium (TicketPlus 隱身模式) 訪問首頁並等待 CF 通關...")
+                print("SCRAPER: [KKTIX] 正在以 Firefox 訪問首頁並等待 CF 通關...")
                 await page.goto("https://kktix.com/", timeout=60000, wait_until="domcontentloaded")
                 
                 # 給 Cloudflare 一點時間運算通過驗證
@@ -69,7 +56,7 @@ async def scrape_kktix_events(db: Session):
                 events_data = []
                 seen_urls = set()
                 
-                print("SCRAPER: [KKTIX] 嘗試在已通關的 Chromium 內部擷取 Atom Feed...")
+                print("SCRAPER: [KKTIX] 嘗試在已通關的 Firefox 內部擷取 Atom Feed...")
                 try:
                     # 利用已通關的瀏覽器 Cookie 進行內部 API 請求
                     api_data = await page.evaluate('''async () => {
