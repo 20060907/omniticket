@@ -10,35 +10,56 @@ from sqlalchemy.orm import Session
 from db.models import Event
 
 async def fetch_with_proxies(session, target_url, is_json=False):
-    """強大的多重免費代理輪詢機制，徹底繞過 AWS IP 封鎖"""
-    googlebot_ua = {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}
-    requests_config = [
-        (target_url, None), # 1. 直連
-        (target_url, googlebot_ua), # 2. Googlebot 偽裝 (WAF 常對搜尋引擎開綠燈)
-        (f"https://api.codetabs.com/v1/proxy/?quest={urllib.parse.quote(target_url)}", None), # 3. CodeTabs
-        (f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}", None), # 4. AllOrigins
-        (f"https://corsproxy.io/?url={urllib.parse.quote(target_url)}", None), # 5. CORS Proxy
-        (f"https://thingproxy.freeboard.io/fetch/{target_url}", None), # 6. ThingProxy
+    """強大的多重免費代理輪詢機制，加上社群爬蟲白名單偽裝"""
+    
+    # 🎯 社群平台爬蟲特權：各大防護系統為確保網址分享能正常產生縮圖，通常會對這些 UA 絕對放行！
+    headers_list = [
+        {"User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)"}, # FB 爬蟲
+        {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"}, # Google 爬蟲
+        {"User-Agent": "Twitterbot/1.0"}, # Twitter 爬蟲
+        None # 預設 (curl_cffi 偽裝的 Chrome/Safari)
     ]
     
-    for p_url, headers in requests_config:
+    # 1. 優先測試直連搭配社群 UA 偽裝
+    for headers in headers_list:
         try:
-            await asyncio.sleep(0.5) # 加上微小延遲避免被視為攻擊
-            resp = await session.get(p_url, headers=headers, timeout=15)
+            await asyncio.sleep(0.5)
+            resp = await session.get(target_url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 text = resp.text
-                # 檢查是否被 WAF 攔截畫面取代
-                if any(waf in text for waf in ["Identity Verified", "Cloudfront", "Just a moment", "Cloudflare", "Attention Required"]):
-                    continue
-                
-                if is_json:
-                    try:
-                        data = resp.json()
-                        if data: return data, text
-                    except Exception: continue
-                else:
-                    if len(text) > 300: return None, text
+                if not any(waf in text for waf in ["Identity Verified", "Cloudfront", "Just a moment", "Cloudflare", "Attention Required"]):
+                    if is_json:
+                        try:
+                            data = resp.json()
+                            if data: return data, text
+                        except Exception: pass
+                    else:
+                        if len(text) > 300: return None, text
         except Exception: pass
+
+    # 2. 如果直連全死，再測試第三方代理伺服器
+    proxies = [
+        f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}",
+        f"https://api.codetabs.com/v1/proxy/?quest={urllib.parse.quote(target_url)}",
+        f"https://corsproxy.io/?url={urllib.parse.quote(target_url)}"
+    ]
+    
+    for p_url in proxies:
+        try:
+            await asyncio.sleep(0.5)
+            resp = await session.get(p_url, timeout=15)
+            if resp.status_code == 200:
+                text = resp.text
+                if not any(waf in text for waf in ["Identity Verified", "Cloudfront", "Just a moment", "Cloudflare", "Attention Required"]):
+                    if is_json:
+                        try:
+                            data = resp.json()
+                            if data: return data, text
+                        except Exception: pass
+                    else:
+                        if len(text) > 300: return None, text
+        except Exception: pass
+        
     return None, None
 
 async def scrape_kktix_events(db: Session):
@@ -50,7 +71,8 @@ async def scrape_kktix_events(db: Session):
         db.query(Event).filter(Event.title.like('%建立活動%')).delete(synchronize_session=False)
         db.commit()
 
-        async with AsyncSession(impersonate="chrome120") as session:
+        # 升級 impersonate 為更新的瀏覽器特徵
+        async with AsyncSession(impersonate="safari17_0") as session:
             print("SCRAPER: [KKTIX] 嘗試透過多重代理與 Atom Feed 獲取活動列表...")
             
             events_data = []
@@ -82,7 +104,9 @@ async def scrape_kktix_events(db: Session):
                                 seen_urls.add(url)
                                 events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
                     else:
-                        print(f"SCRAPER: [KKTIX] rss2json 失敗原因: {data.get('message')}")
+                        print(f"SCRAPER: [KKTIX] rss2json 回傳錯誤: {data.get('message')}")
+                else:
+                    print(f"SCRAPER: [KKTIX] rss2json 伺服器回傳狀態碼: {rss_resp.status_code}")
             except Exception as e:
                 print(f"SCRAPER: [KKTIX] rss2json 代理解析錯誤: {e}")
 
@@ -229,7 +253,7 @@ async def scrape_tixcraft_events(db: Session):
     new_event_titles = []
     
     try:
-        async with AsyncSession(impersonate="chrome120") as session:
+        async with AsyncSession(impersonate="safari17_0") as session:
             print("SCRAPER: [TIXCRAFT] 透過 AllOrigins 代理繞過 AWS IP 封鎖...")
             proxy_url = f"https://api.allorigins.win/raw?url={urllib.parse.quote('https://tixcraft.com/activity')}"
             response = await session.get(proxy_url, timeout=30)
