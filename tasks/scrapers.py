@@ -199,22 +199,45 @@ async def scrape_kktix_events(db: Session):
                                 events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
                             
             if not events_data:
-                print("SCRAPER: [KKTIX] 警告：純請求皆被 CF 阻擋。啟動終極大絕招：Playwright 真人模擬通關...")
+                print("SCRAPER: [KKTIX] 警告：純請求皆被 CF 阻擋。啟動終極大絕招：Playwright 真人模擬通關 (TicketPlus 級別)...")
                 try:
                     async with async_playwright() as p:
-                        # 使用 Firefox 引擎最容易自動通關 CF Turnstile
-                        browser = await p.firefox.launch(headless=True)
+                        # 🎯 改用在 TicketPlus 實測 100% 成功的 Chromium + 全套隱身參數
+                        browser = await p.chromium.launch(
+                            headless=True,
+                            args=[
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-infobars",
+                                "--no-sandbox",
+                                "--window-size=1920,1080",
+                                "--disable-dev-shm-usage"
+                            ]
+                        )
                         try:
                             context = await browser.new_context(
-                                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
+                                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                                 viewport={"width": 1920, "height": 1080},
                                 locale="zh-TW"
                             )
                             page = await context.new_page()
-                            # 隱藏自動化標籤
-                            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
                             
-                            print("SCRAPER: [KKTIX] 正在以無頭瀏覽器訪問首頁並計算 CF 挑戰...")
+                            # 隱藏自動化標籤
+                            await page.add_init_script("""
+                                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                                window.chrome = { runtime: {} };
+                            """)
+                            
+                            # 🎯 網路攔截器：無差別捕捉 KKTIX 載入時發出的所有 JSON API！
+                            intercepted_jsons = []
+                            async def handle_response(response):
+                                if "json" in response.headers.get("content-type", ""):
+                                    try:
+                                        data = await response.json()
+                                        intercepted_jsons.append(data)
+                                    except: pass
+                            page.on("response", handle_response)
+                            
+                            print("SCRAPER: [KKTIX] 正在以 Chromium 訪問首頁並計算 CF 挑戰...")
                             await page.goto("https://kktix.com/events", timeout=60000, wait_until="domcontentloaded")
                             
                             # 給 Cloudflare 一點時間運算通過驗證
@@ -229,42 +252,48 @@ async def scrape_kktix_events(db: Session):
                                 else:
                                     break
                                     
-                            print("SCRAPER: [KKTIX] 嘗試透過瀏覽器內部 Fetch 獲取 API 資料...")
+                            print("SCRAPER: [KKTIX] CF 驗證結束，等待頁面與活動列表載入...")
+                            # 🎯 關鍵修復：等待至少一個活動卡片出現，確保 SPA 渲染完成！
                             try:
-                                # 利用已通關的瀏覽器 Cookie 進行內部 API 請求
-                                api_data = await page.evaluate('''async () => {
-                                    const resp = await Promise.race([
-                                        fetch("/events.json"),
-                                        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 10000))
-                                    ]);
-                                    if (!resp.ok) throw new Error("API failed");
-                                    return await resp.json();
-                                }''')
-                                
-                                if api_data and "entry" in api_data:
-                                    print("SCRAPER: [KKTIX] Playwright 內部 Fetch 成功！")
-                                    for entry in api_data.get("entry", []):
-                                        url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
-                                        if not url or url in seen_urls: continue
-                                        if "dashboard/events/new" in url or "建立活動" in title: continue
-                                        img_src = ""
-                                        if summary:
-                                            soup_sum = BeautifulSoup(summary, 'html.parser')
-                                            img = soup_sum.find('img')
-                                            if img: img_src = img.get('src') or ""
-                                        if title and len(title) > 2:
-                                            seen_urls.add(url)
-                                            events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                                await page.wait_for_selector('a[href*="/events/"]:not([href$="/events"]):not([href$="/events/"])', timeout=15000)
                             except Exception as e:
-                                print(f"SCRAPER: [KKTIX] 內部 Fetch 失敗: {e}，改用 DOM 網頁解析...")
+                                print(f"SCRAPER: [KKTIX] 等待活動列表超時 (可能已被阻擋或無活動): {e}")
+
+                            # 向下捲動，觸發更多懶加載與底層 API
+                            for _ in range(3):
+                                await page.evaluate("window.scrollBy(0, 800);")
+                                await page.wait_for_timeout(1500)
                                 
+                            print(f"SCRAPER: [KKTIX] 頁面載入完成，共攔截到 {len(intercepted_jsons)} 個 API 回應。")
+                            
+                            # 1. 優先從攔截到的底層 JSON 中提取
+                            def extract_from_json(obj):
+                                if isinstance(obj, dict):
+                                    # 遞迴尋找符合 KKTIX 格式的物件
+                                    if "url" in obj and "title" in obj and "summary" in obj:
+                                        url, title, summary = obj.get("url", ""), obj.get("title", ""), obj.get("summary", "")
+                                        if url and "/events/" in url and title and "建立活動" not in title:
+                                            if url not in seen_urls:
+                                                seen_urls.add(url)
+                                                img_src = ""
+                                                if summary:
+                                                    soup_sum = BeautifulSoup(str(summary), 'html.parser')
+                                                    img = soup_sum.find('img')
+                                                    if img: img_src = img.get('src') or ""
+                                                events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                                    for v in obj.values(): extract_from_json(v)
+                                elif isinstance(obj, list):
+                                    for item in obj: extract_from_json(item)
+
+                            for data in intercepted_jsons:
+                                extract_from_json(data)
+                                
+                            if events_data:
+                                print(f"SCRAPER: [KKTIX] 成功從底層 API 攔截到 {len(events_data)} 筆活動！")
+                                
+                            # 2. 如果 JSON 攔截落空，改用真正的 DOM 網頁解析
                             if not events_data:
-                                await page.wait_for_timeout(3000)
-                                await page.evaluate("window.scrollBy(0, 800);")
-                                await page.wait_for_timeout(2000)
-                                await page.evaluate("window.scrollBy(0, 800);")
-                                await page.wait_for_timeout(2000)
-                                
+                                print("SCRAPER: [KKTIX] API 攔截無結果，改用 DOM 網頁解析...")
                                 html_content = await page.content()
                                 soup = BeautifulSoup(html_content, 'html.parser')
                                 for a in soup.find_all('a', href=True):
@@ -279,6 +308,9 @@ async def scrape_kktix_events(db: Session):
                                         if not title:
                                             heading = container.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'p'], class_=re.compile(r'title|name', re.I))
                                             if heading: title = heading.get_text(strip=True)
+                                    if not title and img_src:
+                                        img = a.find('img')
+                                        if img: title = img.get('alt') or a.get('title') or ""
                                     if title and len(title) > 2 and "建立活動" not in title:
                                         seen_urls.add(url)
                                         events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
