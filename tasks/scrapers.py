@@ -18,11 +18,19 @@ async def scrape_kktix_events(db: Session):
     print("SCRAPER: [KKTIX] Starting scrape job...")
     new_event_titles = []
     async with async_playwright() as p:
-        # 🎯 改用 Safari (WebKit) 引擎！
-        # Cloudflare 對 Headless Chrome 的特徵抓得很死，既然你習慣用 Safari，我們就用 WebKit 核心來突破！
-        browser = await p.webkit.launch(headless=True)
+        # 🎯 再次進化：改回 Chromium 引擎，並加上全套的隱身參數 (Stealth Args) 來突破 Cloudflare
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--no-sandbox",
+                "--window-size=1920,1080",
+                "--disable-dev-shm-usage"
+            ]
+        )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
             locale="zh-TW"
         )
@@ -30,13 +38,8 @@ async def scrape_kktix_events(db: Session):
         
         await page.add_init_script(
             """
-            // 🎯 Safari/WebKit 專屬的輕量級偽裝
-            try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
-
-            if (window.outerWidth === 0) {
-                Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth || 1920 });
-                Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight || 1080 });
-            }
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
             """
         )
 
@@ -321,13 +324,11 @@ async def scrape_tixcraft_events(db: Session):
         page = await context.new_page()
 
         try:
-            # 移除 wait_until="domcontentloaded"
-            await page.goto("https://tixcraft.com/activity", timeout=60000)
+            await page.goto("https://tixcraft.com/activity", timeout=60000, wait_until="domcontentloaded")
             
             try:
-                # 改等網路請求靜止，並強制多等 3 秒
-                await page.wait_for_load_state("networkidle", timeout=20000)
-                await page.wait_for_timeout(3000)
+                # 🎯 拓元常有追蹤代碼卡住 networkidle，改用固定等待讓 DOM 渲染完成
+                await page.wait_for_timeout(4000)
             except Exception as e:
                 title = await page.title()
                 print(f"SCRAPER: [TIXCRAFT] 抓取失敗！目前機器人看到的網頁標題是: '{title}'")
@@ -352,7 +353,8 @@ async def scrape_tixcraft_events(db: Session):
             # 拓元的無敵抓取法：尋找所有包含 /activity/detail/ 的連結
             events_data = await page.evaluate(
                 """() => {
-                    const links = Array.from(document.querySelectorAll('a[href*="/activity/detail/"]'));
+                    // 🎯 拓元最近把活動網址從 /activity/detail/ 改成了 /activity/game/，所以我們兩個都抓！
+                    const links = Array.from(document.querySelectorAll('a[href*="/activity/detail/"], a[href*="/activity/game/"]'));
                     const results = [];
                     const seen = new Set();
                     
