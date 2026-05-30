@@ -84,92 +84,92 @@ async def scrape_kktix_events(db: Session):
                     else:
                         print(f"SCRAPER: [KKTIX] rss2json 失敗原因: {data.get('message')}")
             except Exception as e:
-            print(f"SCRAPER: [KKTIX] rss2json 代理解析錯誤: {e}")
+                print(f"SCRAPER: [KKTIX] rss2json 代理解析錯誤: {e}")
 
             if not events_data:
-            print("SCRAPER: [KKTIX] 嘗試使用備用 RSS 解析代理 (Factmaven)...")
-            try:
-                fm_url = f"https://api.factmaven.com/xml-to-json/?xml={urllib.parse.quote('https://kktix.com/events.atom')}"
-                fm_resp = await session.get(fm_url, timeout=20)
-                if fm_resp.status_code == 200:
-                    fm_data = fm_resp.json()
-                    entries = fm_data.get("feed", {}).get("entry", [])
-                    if isinstance(entries, dict): entries = [entries]
-                    
-                    for entry in entries:
-                        title = entry.get("title", "")
+                print("SCRAPER: [KKTIX] 嘗試使用備用 RSS 解析代理 (Factmaven)...")
+                try:
+                    fm_url = f"https://api.factmaven.com/xml-to-json/?xml={urllib.parse.quote('https://kktix.com/events.atom')}"
+                    fm_resp = await session.get(fm_url, timeout=20)
+                    if fm_resp.status_code == 200:
+                        fm_data = fm_resp.json()
+                        entries = fm_data.get("feed", {}).get("entry", [])
+                        if isinstance(entries, dict): entries = [entries]
                         
-                        url = ""
-                        link_obj = entry.get("link")
-                        if isinstance(link_obj, dict): url = link_obj.get("href", "")
-                        elif isinstance(link_obj, list) and len(link_obj) > 0: url = link_obj[0].get("href", "")
-                        elif isinstance(link_obj, str): url = link_obj
-                        
-                        summary = entry.get("summary", "") or entry.get("content", "")
-                        if isinstance(summary, dict): 
-                            summary = summary.get("text", "") or summary.get("#text", "") or summary.get("content", "") or str(summary)
-                        
-                        if not url or url in seen_urls: continue
-                        if "dashboard/events/new" in url or "建立活動" in title: continue
-                        
-                        img_src = ""
-                        if summary:
-                            soup_sum = BeautifulSoup(str(summary), 'html.parser')
-                            img = soup_sum.find('img')
-                            if img: img_src = img.get('src') or ""
+                        for entry in entries:
+                            title = entry.get("title", "")
                             
-                        if title and len(title) > 2:
-                            seen_urls.add(url)
-                            events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
-            except Exception as e:
-                print(f"SCRAPER: [KKTIX] Factmaven 代理解析失敗: {e}")
+                            url = ""
+                            link_obj = entry.get("link")
+                            if isinstance(link_obj, dict): url = link_obj.get("href", "")
+                            elif isinstance(link_obj, list) and len(link_obj) > 0: url = link_obj[0].get("href", "")
+                            elif isinstance(link_obj, str): url = link_obj
+                            
+                            summary = entry.get("summary", "") or entry.get("content", "")
+                            if isinstance(summary, dict): 
+                                summary = summary.get("text", "") or summary.get("#text", "") or summary.get("content", "") or str(summary)
+                            
+                            if not url or url in seen_urls: continue
+                            if "dashboard/events/new" in url or "建立活動" in title: continue
+                            
+                            img_src = ""
+                            if summary:
+                                soup_sum = BeautifulSoup(str(summary), 'html.parser')
+                                img = soup_sum.find('img')
+                                if img: img_src = img.get('src') or ""
+                                
+                            if title and len(title) > 2:
+                                seen_urls.add(url)
+                                events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                except Exception as e:
+                    print(f"SCRAPER: [KKTIX] Factmaven 代理解析失敗: {e}")
 
-        if not events_data:
-            print("SCRAPER: [KKTIX] 專屬 API 皆失敗，退回多重代理機制...")
+            if not events_data:
+                print("SCRAPER: [KKTIX] 專屬 API 皆失敗，退回多重代理機制...")
                 # KKTIX 隱藏技巧：Atom Feed 幾乎不會被 Cloudflare 擋！
                 json_data, atom_text = await fetch_with_proxies(session, "https://kktix.com/events.atom", is_json=False)
-            
-            if atom_text and "<entry>" in atom_text:
-                soup = BeautifulSoup(atom_text, "html.parser")
-                for entry in soup.find_all("entry"):
-                    title_elem = entry.find("title")
-                    link_elem = entry.find("link")
-                    summary_elem = entry.find("summary")
-                    
-                    if not title_elem or not link_elem: continue
-                    title, url = title_elem.text.strip(), link_elem.get("href", "")
-                    
-                    if not url or url in seen_urls: continue
-                    if "dashboard/events/new" in url or "建立活動" in title: continue
-                    
-                    img_src = ""
-                    if summary_elem:
-                        soup_sum = BeautifulSoup(summary_elem.text, 'html.parser')
-                        img = soup_sum.find('img')
-                        if img: img_src = img.get('src') or ""
+                
+                if atom_text and "<entry>" in atom_text:
+                    soup = BeautifulSoup(atom_text, "html.parser")
+                    for entry in soup.find_all("entry"):
+                        title_elem = entry.find("title")
+                        link_elem = entry.find("link")
+                        summary_elem = entry.find("summary")
                         
-                    if title and len(title) > 2:
-                        seen_urls.add(url)
-                        events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
-            else:
-                # 備用方案：JSON API + 多重代理
-                json_data, _ = await fetch_with_proxies(session, "https://kktix.com/events.json", is_json=True)
-                if json_data:
-                    for entry in json_data.get("entry", []):
-                        url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
+                        if not title_elem or not link_elem: continue
+                        title, url = title_elem.text.strip(), link_elem.get("href", "")
                         
                         if not url or url in seen_urls: continue
                         if "dashboard/events/new" in url or "建立活動" in title: continue
                         
                         img_src = ""
-                        if summary:
-                            soup_sum = BeautifulSoup(summary, 'html.parser')
+                        if summary_elem:
+                            soup_sum = BeautifulSoup(summary_elem.text, 'html.parser')
                             img = soup_sum.find('img')
                             if img: img_src = img.get('src') or ""
                             
                         if title and len(title) > 2:
                             seen_urls.add(url)
                             events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+                else:
+                    # 備用方案：JSON API + 多重代理
+                    json_data, _ = await fetch_with_proxies(session, "https://kktix.com/events.json", is_json=True)
+                    if json_data:
+                        for entry in json_data.get("entry", []):
+                            url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
+                            
+                            if not url or url in seen_urls: continue
+                            if "dashboard/events/new" in url or "建立活動" in title: continue
+                            
+                            img_src = ""
+                            if summary:
+                                soup_sum = BeautifulSoup(summary, 'html.parser')
+                                img = soup_sum.find('img')
+                                if img: img_src = img.get('src') or ""
+                                
+                            if title and len(title) > 2:
+                                seen_urls.add(url)
+                                events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
                             
             if not events_data:
                 print("SCRAPER: [KKTIX] 警告：所有突破方式皆失敗。")
