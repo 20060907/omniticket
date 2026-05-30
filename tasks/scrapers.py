@@ -39,21 +39,31 @@ async def fetch_with_proxies(session, target_url, is_json=False):
 
     # 2. 如果直連全死，再測試第三方代理伺服器
     proxies = [
-        f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}",
-        f"https://api.codetabs.com/v1/proxy/?quest={urllib.parse.quote(target_url)}",
-        f"https://corsproxy.io/?url={urllib.parse.quote(target_url)}"
+        (f"https://api.allorigins.win/raw?url={urllib.parse.quote(target_url)}", None),
+        (f"https://api.allorigins.win/get?url={urllib.parse.quote(target_url)}", None),
+        (f"https://api.codetabs.com/v1/proxy/?quest={urllib.parse.quote(target_url)}", None),
+        (f"https://corsproxy.io/?{urllib.parse.quote(target_url)}", None),
+        (f"https://proxy.cors.sh/{target_url}", {"x-cors-api-key": "temp_123456789"}),
+        (f"https://cors-anywhere.herokuapp.com/{target_url}", {"X-Requested-With": "XMLHttpRequest"})
     ]
     
-    for p_url in proxies:
+    for p_url, headers in proxies:
         try:
             await asyncio.sleep(0.5)
-            resp = await session.get(p_url, timeout=15)
+            resp = await session.get(p_url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 text = resp.text
                 if not any(waf in text for waf in ["Identity Verified", "Cloudfront", "Just a moment", "Cloudflare", "Attention Required"]):
-                    if is_json:
+                    if "api.allorigins.win/get" in p_url:
                         try:
                             data = resp.json()
+                            text = data.get("contents", "")
+                            if not text: continue
+                        except: continue
+                        
+                    if is_json:
+                        try:
+                            data = json.loads(text)
                             if data: return data, text
                         except Exception: pass
                     else:
@@ -111,34 +121,25 @@ async def scrape_kktix_events(db: Session):
                 print(f"SCRAPER: [KKTIX] rss2json 代理解析錯誤: {e}")
 
             if not events_data:
-                print("SCRAPER: [KKTIX] 嘗試使用備用 RSS 解析代理 (Factmaven)...")
+                print("SCRAPER: [KKTIX] 嘗試使用備用 RSS 解析代理 (feed2json)...")
                 try:
-                    fm_url = f"https://api.factmaven.com/xml-to-json/?xml={urllib.parse.quote('https://kktix.com/events.atom')}"
+                    fm_url = f"https://feed2json.org/convert?url={urllib.parse.quote('https://kktix.com/events.atom')}"
                     fm_resp = await session.get(fm_url, timeout=20)
                     if fm_resp.status_code == 200:
                         fm_data = fm_resp.json()
-                        entries = fm_data.get("feed", {}).get("entry", [])
-                        if isinstance(entries, dict): entries = [entries]
+                        items = fm_data.get("items", [])
                         
-                        for entry in entries:
-                            title = entry.get("title", "")
-                            
-                            url = ""
-                            link_obj = entry.get("link")
-                            if isinstance(link_obj, dict): url = link_obj.get("href", "")
-                            elif isinstance(link_obj, list) and len(link_obj) > 0: url = link_obj[0].get("href", "")
-                            elif isinstance(link_obj, str): url = link_obj
-                            
-                            summary = entry.get("summary", "") or entry.get("content", "")
-                            if isinstance(summary, dict): 
-                                summary = summary.get("text", "") or summary.get("#text", "") or summary.get("content", "") or str(summary)
+                        for item in items:
+                            title = item.get("title", "")
+                            url = item.get("url", "")
+                            summary = item.get("content_html", "") or item.get("summary", "")
                             
                             if not url or url in seen_urls: continue
                             if "dashboard/events/new" in url or "建立活動" in title: continue
                             
                             img_src = ""
                             if summary:
-                                soup_sum = BeautifulSoup(str(summary), 'html.parser')
+                                soup_sum = BeautifulSoup(summary, 'html.parser')
                                 img = soup_sum.find('img')
                                 if img: img_src = img.get('src') or ""
                                 
@@ -146,7 +147,7 @@ async def scrape_kktix_events(db: Session):
                                 seen_urls.add(url)
                                 events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
                 except Exception as e:
-                    print(f"SCRAPER: [KKTIX] Factmaven 代理解析失敗: {e}")
+                    print(f"SCRAPER: [KKTIX] feed2json 代理解析失敗: {e}")
 
             if not events_data:
                 print("SCRAPER: [KKTIX] 專屬 API 皆失敗，退回多重代理機制...")
