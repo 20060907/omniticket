@@ -26,8 +26,9 @@ async def scrape_kktix_events(db: Session):
                 "--disable-infobars",
                 "--no-sandbox",
                 "--window-size=1920,1080",
-                "--disable-dev-shm-usage"
-            ]
+                "--disable-dev-shm-usage",
+            ],
+            ignore_default_args=["--enable-automation"]
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -38,10 +39,13 @@ async def scrape_kktix_events(db: Session):
         
         await page.add_init_script(
             """
+            try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             window.chrome = { runtime: {} };
             Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en-US', 'en']});
             Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
             """
         )
 
@@ -59,6 +63,8 @@ async def scrape_kktix_events(db: Session):
             # 🎯 預熱機制：先到首頁取得合法 Cookie，降低被 Cloudflare 阻擋的機率
             print("SCRAPER: [KKTIX] 正在載入首頁進行 Cookie 預熱...")
             await page.goto("https://kktix.com/", timeout=60000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+            await page.evaluate("window.scrollBy(0, 500);")
             await page.wait_for_timeout(2000)
             
             # 🎯 回歸最自然的人類瀏覽模式：只載入首頁一次，後續全部依賴「點擊下一頁」，不再瘋狂觸發 Cloudflare！
@@ -314,19 +320,32 @@ async def scrape_tixcraft_events(db: Session):
     new_event_titles = []
     async with async_playwright() as p:
         # 加上隱藏自動化特徵的啟動參數
-        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        browser = await p.chromium.launch(
+            headless=True, 
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--no-sandbox",
+                "--window-size=1920,1080",
+                "--disable-dev-shm-usage"
+            ],
+            ignore_default_args=["--enable-automation"]
+        )
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080}
         )
         page = await context.new_page()
         
         await page.add_init_script(
             """
+            try { delete Object.getPrototypeOf(navigator).webdriver; } catch(e) {}
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             window.chrome = { runtime: {} };
             Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en-US', 'en']});
             Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
             """
         )
 
@@ -334,6 +353,8 @@ async def scrape_tixcraft_events(db: Session):
             # 🎯 預熱機制：先到首頁取得 AWS WAF 信任的 Cookie
             print("SCRAPER: [TIXCRAFT] 正在載入首頁進行 Cookie 預熱...")
             await page.goto("https://tixcraft.com/", timeout=60000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+            await page.evaluate("window.scrollBy(0, 500);")
             await page.wait_for_timeout(2000)
             
             print("SCRAPER: [TIXCRAFT] 正在進入活動列表...")
