@@ -40,6 +40,8 @@ async def scrape_kktix_events(db: Session):
             """
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en-US', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
             """
         )
 
@@ -54,9 +56,14 @@ async def scrape_kktix_events(db: Session):
             page_num = 1
             reloaded_pages = set()
             
+            # 🎯 預熱機制：先到首頁取得合法 Cookie，降低被 Cloudflare 阻擋的機率
+            print("SCRAPER: [KKTIX] 正在載入首頁進行 Cookie 預熱...")
+            await page.goto("https://kktix.com/", timeout=60000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+            
             # 🎯 回歸最自然的人類瀏覽模式：只載入首頁一次，後續全部依賴「點擊下一頁」，不再瘋狂觸發 Cloudflare！
             target_url = "https://kktix.com/events?end_at=&event_tag_ids_in=1%2C6&max_price=&min_price=&search=&start_at="
-            print(f"SCRAPER: [KKTIX] 正在載入首頁...")
+            print(f"SCRAPER: [KKTIX] 正在進入活動列表...")
             await page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
 
             while True:
@@ -154,54 +161,39 @@ async def scrape_kktix_events(db: Session):
                 }""")
                 await page.wait_for_timeout(1000)
 
-                # 放棄死板的 CSS 類別，改用「無敵抓取法」：尋找所有包含 /events/ 的連結
+                # 🎯 無敵抓取法進化版：掃描所有 <a> 標籤，不依賴任何特定的 CSS 類別！
                 events_data = await page.evaluate(
                     """() => {
-                        const links = Array.from(document.querySelectorAll('a[href*="/events/"]'));
+                        const links = Array.from(document.querySelectorAll('a'));
                         const results = [];
                         const seen = new Set();
                         
                         links.forEach(a => {
                             const url = a.href;
-                            if (seen.has(url) || url.endsWith('/events/')) return;
+                            if (!url.includes('/events/') || url.endsWith('/events') || url.endsWith('/events/')) return;
+                            if (url.includes('/dashboard/') || url.includes('/users/') || seen.has(url)) return;
                             
-                            let title = '';
-                            // 擴大父元素的搜尋範圍，確保能包住整個活動卡片
-                            const parent = a.closest('li, .item, .card, article, div[class*="event"], div[class*="activity"]') || a.parentElement.parentElement || a;
-                            const heading = parent.querySelector('h1, h2, h3, h4, h5, h6, .title, .name');
-                            title = heading ? heading.textContent.trim() : a.textContent.trim();
-                            title = title.replace(/\\s+/g, ' ').trim(); // 清除多餘空白
+                            let title = a.innerText.trim();
+                            let imgSrc = '';
                             
-                            let imgSrc = null;
-                            
-                            // 1. 尋找所有 img 標籤，排除掉 base64 的佔位圖
-                            const imgs = parent.querySelectorAll('img');
-                            for (let img of imgs) {
-                                // 🎯 破圖突破口 2：破解 Angular (ng-src) 與 CF Rocket Loader (data-cfsrc) 的隱藏圖片屬性
-                                let s = img.getAttribute('ng-src') || img.getAttribute('data-cfsrc') || img.getAttribute('data-src') || img.getAttribute('data-lazy') || img.getAttribute('data-original') || img.currentSrc || img.src;
-                                if (s && !s.startsWith('data:')) {
-                                    imgSrc = s;
-                                    break;
+                            const container = a.closest('li, .item, .card, article, div[class*="event"]') || a.parentElement;
+                            if (container) {
+                                const img = container.querySelector('img');
+                                if (img) imgSrc = img.src || img.getAttribute('data-src') || img.getAttribute('ng-src') || '';
+                                
+                                if (!title) {
+                                    const heading = container.querySelector('h1, h2, h3, h4, h5, h6, .title, .name');
+                                    if (heading) title = heading.innerText.trim();
                                 }
                             }
                             
-                            // 2. 如果找不到 img，嘗試找 CSS 的 background-image
-                            if (!imgSrc) {
-                                const bgNode = parent.querySelector('[style*="background-image"]');
-                                if (bgNode) {
-                                    const match = bgNode.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
-                                    if (match) imgSrc = match[1];
-                                }
+                            if (!title && imgSrc) {
+                                title = a.title || a.querySelector('img')?.alt || '';
                             }
                             
-                            // 3. 確保圖片網址是絕對路徑
-                            if (imgSrc && !imgSrc.startsWith('http') && !imgSrc.startsWith('data:')) {
-                                try { imgSrc = new URL(imgSrc, window.location.origin).href; } catch(e) {}
-                            }
-                            
-                            if (title && title.length > 2) {
+                            if (title && title.length > 2 && !title.includes('建立活動')) {
                                 seen.add(url);
-                                results.push({ title: title, url: url, cover_image: imgSrc });
+                                results.push({ title: title.replace(/\\s+/g, ' '), url: url, cover_image: imgSrc });
                             }
                         });
                         return results;
@@ -222,6 +214,12 @@ async def scrape_kktix_events(db: Session):
 
                 # 判斷是否還有下一頁：如果這一頁沒抓到任何新活動，代表已經到達最後一頁！
                 if valid_events_in_page == 0:
+                    # 輸出日誌協助 Debug
+                    if not cards_found:
+                        print("SCRAPER: [KKTIX] 警告！抓到 0 個活動。可能是 CF 阻擋。")
+                        html_preview = await page.content()
+                        print(html_preview[:500])
+                        
                     print("SCRAPER: [KKTIX] 本頁無新活動，已經到達最後一頁，結束抓取。")
                     break
                     
@@ -322,8 +320,23 @@ async def scrape_tixcraft_events(db: Session):
             viewport={"width": 1920, "height": 1080}
         )
         page = await context.new_page()
+        
+        await page.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en-US', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            """
+        )
 
         try:
+            # 🎯 預熱機制：先到首頁取得 AWS WAF 信任的 Cookie
+            print("SCRAPER: [TIXCRAFT] 正在載入首頁進行 Cookie 預熱...")
+            await page.goto("https://tixcraft.com/", timeout=60000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(2000)
+            
+            print("SCRAPER: [TIXCRAFT] 正在進入活動列表...")
             await page.goto("https://tixcraft.com/activity", timeout=60000, wait_until="domcontentloaded")
             
             try:
@@ -350,60 +363,50 @@ async def scrape_tixcraft_events(db: Session):
             }""")
             await page.wait_for_timeout(5000) # 加長等待時間，確保所有懶加載圖片與 DOM 出現
 
-            # 拓元的無敵抓取法：尋找所有包含 /activity/detail/ 的連結
+            # 🎯 拓元無敵抓取法進化版：不受限於特定的父層類別，直接從超連結回推！
             events_data = await page.evaluate(
                 """() => {
-                    // 🎯 拓元最近把活動網址從 /activity/detail/ 改成了 /activity/game/，所以我們兩個都抓！
-                    const links = Array.from(document.querySelectorAll('a[href*="/activity/detail/"], a[href*="/activity/game/"]'));
+                    const links = Array.from(document.querySelectorAll('a'));
                     const results = [];
                     const seen = new Set();
                     
                     links.forEach(a => {
                         const url = a.href;
+                        if (!url.includes('/activity/detail/') && !url.includes('/activity/game/')) return;
                         if (seen.has(url)) return;
                         
-                        let title = '';
-                        // 擴大父元素的搜尋範圍
-                        const parent = a.closest('li, .item, .card, article, div[class*="event"], div[class*="activity"]') || a.parentElement.parentElement || a;
-                        const heading = parent.querySelector('h1, h2, h3, h4, h5, h6, .title, .name');
-                        title = heading ? heading.textContent.trim() : a.textContent.trim();
-                        title = title.replace(/\\s+/g, ' ').trim();
+                        let title = a.innerText.trim();
+                        let imgSrc = '';
                         
-                        let imgSrc = null;
-                        
-                        // 1. 尋找所有 img 標籤，排除掉 base64 的佔位圖
-                        const imgs = parent.querySelectorAll('img');
-                        for (let img of imgs) {
-                            // 拓元同樣加入防護屬性提取
-                            let s = img.getAttribute('ng-src') || img.getAttribute('data-cfsrc') || img.getAttribute('data-src') || img.getAttribute('data-lazy') || img.getAttribute('data-original') || img.currentSrc || img.src;
-                            if (s && !s.startsWith('data:')) {
-                                imgSrc = s;
-                                break;
+                        const container = a.closest('li, .item, .card, article, div.activity-wrapper, div[class*="event"]') || a.parentElement;
+                        if (container) {
+                            const img = container.querySelector('img');
+                            if (img) imgSrc = img.src || img.getAttribute('data-src') || img.getAttribute('ng-src') || '';
+                            
+                            if (!title) {
+                                const heading = container.querySelector('h1, h2, h3, h4, h5, h6, .title, .name, .txt');
+                                if (heading) title = heading.innerText.trim();
                             }
                         }
                         
-                        // 2. 嘗試找 background-image
                         if (!imgSrc) {
-                            const bgNode = parent.querySelector('[style*="background-image"]');
-                            if (bgNode) {
-                                const match = bgNode.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
-                                if (match) imgSrc = match[1];
-                            }
-                        }
-                        
-                        // 3. 確保是絕對路徑
-                        if (imgSrc && !imgSrc.startsWith('http') && !imgSrc.startsWith('data:')) {
-                            try { imgSrc = new URL(imgSrc, window.location.origin).href; } catch(e) {}
+                            const img = a.querySelector('img');
+                            if (img) imgSrc = img.src || img.getAttribute('data-src') || '';
                         }
                         
                         if (title && title.length > 2) {
                             seen.add(url);
-                            results.push({ title: title, url: url, cover_image: imgSrc });
+                            results.push({ title: title.replace(/\\s+/g, ' '), url: url, cover_image: imgSrc });
                         }
                     });
                     return results;
                 }"""
             )
+            
+            if not events_data:
+                print("SCRAPER: [TIXCRAFT] 警告！抓到 0 個活動。印出網頁前 1000 個字元供 Debug:")
+                html_preview = await page.content()
+                print(html_preview[:1000])
 
             for item in events_data:
                 if not item['url']: continue
