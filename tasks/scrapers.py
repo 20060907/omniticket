@@ -214,23 +214,36 @@ async def scrape_kktix_events(db: Session):
                             # 隱藏自動化標籤
                             await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => false});")
                             
-                            print("SCRAPER: [KKTIX] 正在以無頭瀏覽器訪問 events.json 並計算 CF 挑戰...")
-                            await page.goto("https://kktix.com/events.json", timeout=60000)
+                            print("SCRAPER: [KKTIX] 正在以無頭瀏覽器訪問首頁並計算 CF 挑戰...")
+                            await page.goto("https://kktix.com/events", timeout=60000, wait_until="domcontentloaded")
                             
                             # 給 Cloudflare 一點時間運算通過驗證
-                            for _ in range(15):
+                            for _ in range(20):
                                 title = await page.title()
-                                if "Just a moment" in title or "Cloudflare" in title or "Attention Required" in title:
+                                if any(kw in title for kw in ["Just a moment", "Cloudflare", "Attention Required", "請稍候"]):
+                                    # 盲點 CF 驗證框
+                                    try:
+                                        await page.mouse.click(300, 300)
+                                    except: pass
                                     await page.wait_for_timeout(3000)
                                 else:
                                     break
                                     
-                            content = await page.evaluate("() => document.body.innerText")
+                            print("SCRAPER: [KKTIX] 嘗試透過瀏覽器內部 Fetch 獲取 API 資料...")
                             try:
-                                data = json.loads(content)
-                                if "entry" in data:
-                                    print("SCRAPER: [KKTIX] Playwright 成功突破 Cloudflare 驗證！")
-                                    for entry in data.get("entry", []):
+                                # 利用已通關的瀏覽器 Cookie 進行內部 API 請求
+                                api_data = await page.evaluate('''async () => {
+                                    const resp = await Promise.race([
+                                        fetch("/events.json"),
+                                        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 10000))
+                                    ]);
+                                    if (!resp.ok) throw new Error("API failed");
+                                    return await resp.json();
+                                }''')
+                                
+                                if api_data and "entry" in api_data:
+                                    print("SCRAPER: [KKTIX] Playwright 內部 Fetch 成功！")
+                                    for entry in api_data.get("entry", []):
                                         url, title, summary = entry.get("url", ""), entry.get("title", ""), entry.get("summary", "")
                                         if not url or url in seen_urls: continue
                                         if "dashboard/events/new" in url or "建立活動" in title: continue
@@ -243,9 +256,15 @@ async def scrape_kktix_events(db: Session):
                                             seen_urls.add(url)
                                             events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
                             except Exception as e:
-                                print(f"SCRAPER: [KKTIX] Playwright JSON 解析失敗: {e}，嘗試退回抓取首頁...")
-                                await page.goto("https://kktix.com/events", timeout=60000)
-                                await page.wait_for_timeout(5000)
+                                print(f"SCRAPER: [KKTIX] 內部 Fetch 失敗: {e}，改用 DOM 網頁解析...")
+                                
+                            if not events_data:
+                                await page.wait_for_timeout(3000)
+                                await page.evaluate("window.scrollBy(0, 800);")
+                                await page.wait_for_timeout(2000)
+                                await page.evaluate("window.scrollBy(0, 800);")
+                                await page.wait_for_timeout(2000)
+                                
                                 html_content = await page.content()
                                 soup = BeautifulSoup(html_content, 'html.parser')
                                 for a in soup.find_all('a', href=True):
