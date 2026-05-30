@@ -49,11 +49,41 @@ async def scrape_kktix_events(db: Session):
         async with AsyncSession(impersonate="chrome120") as session:
             print("SCRAPER: [KKTIX] 嘗試透過多重代理與 Atom Feed 獲取活動列表...")
             
-            # KKTIX 隱藏技巧：Atom Feed 幾乎不會被 Cloudflare 擋！
-            json_data, atom_text = await fetch_with_proxies(session, "https://kktix.com/events.atom", is_json=False)
-            
             events_data = []
             seen_urls = set()
+
+            # 🎯 終極 RSS 代理：使用 rss2json 官方 API (各大網站防護通常會放行正規的 RSS 閱讀器)
+            print("SCRAPER: [KKTIX] 嘗試使用 RSS 專屬解析代理 (rss2json)...")
+            try:
+                rss_proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote('https://kktix.com/events.atom')}"
+                rss_resp = await session.get(rss_proxy_url, timeout=20)
+                if rss_resp.status_code == 200:
+                    data = rss_resp.json()
+                    if data.get("status") == "ok":
+                        for item in data.get("items", []):
+                            title = item.get("title", "")
+                            url = item.get("link", "")
+                            summary = item.get("description", "") or item.get("content", "")
+                            
+                            if not url or url in seen_urls: continue
+                            if "dashboard/events/new" in url or "建立活動" in title: continue
+                            
+                            img_src = ""
+                            if summary:
+                                soup_sum = BeautifulSoup(summary, 'html.parser')
+                                img = soup_sum.find('img')
+                                if img: img_src = img.get('src') or ""
+                                
+                            if title and len(title) > 2:
+                                seen_urls.add(url)
+                                events_data.append({"title": re.sub(r'\s+', ' ', title), "url": url, "cover_image": img_src})
+            except Exception as e:
+                print(f"SCRAPER: [KKTIX] rss2json 代理解析失敗: {e}")
+
+            if not events_data:
+                print("SCRAPER: [KKTIX] rss2json 失敗，退回多重代理機制...")
+                # KKTIX 隱藏技巧：Atom Feed 幾乎不會被 Cloudflare 擋！
+                json_data, atom_text = await fetch_with_proxies(session, "https://kktix.com/events.atom", is_json=False)
             
             if atom_text and "<entry>" in atom_text:
                 soup = BeautifulSoup(atom_text, "html.parser")
